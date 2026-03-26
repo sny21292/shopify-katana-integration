@@ -1,7 +1,7 @@
 # Shopify-Katana Integration — Complete Documentation
 
-> A Node.js backend that syncs Purchase Order arrival dates from **Katana MRP** to **Shopify product metafields**.
-> This enables the Shopify storefront to show messages like **"85 units arriving Feb 28"**.
+> A Node.js backend that syncs Purchase Order arrival dates from **Katana MRP** to **Shopify variant metafields**.
+> This enables the Shopify storefront to show per-variant messages like **"85 units arriving Feb 28"**.
 
 ---
 
@@ -38,13 +38,15 @@
 
 **Simple version:** When someone creates a Purchase Order (PO) in Katana (e.g., "85 units of Widget-A arriving March 15"), this app automatically reads that information and writes it to Shopify so the storefront can display it.
 
-**What it writes to Shopify (per product):**
+**What it writes to Shopify (per variant):**
 
 | Metafield | Example | Purpose |
 |-----------|---------|---------|
-| `katana.next_expected_arrival_date` | `2026-03-15` | When the stock will arrive |
-| `katana.next_expected_qty` | `85` | How many units are coming |
-| `katana.next_expected_po_id` | `PO-42` | Which Purchase Order it's from |
+| `custom.next_expected_arrival_date` | `2026-03-15` | When the stock will arrive |
+| `custom.next_expected_quantity` | `85` | How many units are coming |
+| `custom.next_expected_po_id` | `PO-42` | Which Purchase Order it's from |
+
+**Note:** When a variant has no open POs, these metafields are **deleted** (not set to empty/zero) because Shopify doesn't allow blank metafield values.
 
 ---
 
@@ -68,14 +70,15 @@
                ▼
 ┌──────────────────────────────────────────────────────────────┐
 │               OUR SERVER (Digital Ocean)                      │
-│               http://159.203.85.16                            │
+│               https://turnoffroad.duckdns.org                │
 │                                                              │
 │  1. Fetches variants from Katana (to get SKUs)               │
 │  2. Fetches Purchase Orders (to get arrival dates)           │
 │  3. Fetches PO Rows (to get qty per variant per PO)          │
 │  4. Builds a map: { "WIDGET-A" → arrives March 15, qty 85 } │
 │  5. Fetches products from Shopify                            │
-│  6. Matches by SKU and writes metafields                     │
+│  6. Matches each variant by SKU and writes variant metafields│
+│     (or deletes metafields if no open POs for that variant)  │
 │                                                              │
 │  Triggers: Manual (POST /sync) | Cron (every 6 hrs) |       │
 │            Webhook (Katana sends event)                      │
@@ -88,12 +91,14 @@
 │                       SHOPIFY STORE                           │
 │                                                              │
 │  Product "Widget A"                                          │
-│    └── Metafields:                                           │
-│         katana.next_expected_arrival_date = "2026-03-15"     │
-│         katana.next_expected_qty = 85                        │
-│         katana.next_expected_po_id = "PO-42"                 │
+│    └── Variant "Default" (SKU: WIDGET-A)                     │
+│         └── Metafields:                                      │
+│              custom.next_expected_arrival_date = "2026-03-15" │
+│              custom.next_expected_quantity = 85               │
+│              custom.next_expected_po_id = "PO-42"            │
 │                                                              │
-│  Storefront can now show: "85 units arriving March 15"       │
+│  Storefront can now show per-variant: "85 units arriving     │
+│  March 15"                                                   │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -110,7 +115,7 @@ shopify-katana-integration/
 │
 ├── sync.js                  # The "brain" — orchestrates the entire sync process
 │                            #   Calls Katana service, then Shopify service
-│                            #   Matches SKUs and updates metafields
+│                            #   Matches each variant's SKU and updates/deletes metafields
 │
 ├── services/
 │   ├── katana.js            # Talks to Katana API
@@ -119,7 +124,7 @@ shopify-katana-integration/
 │   │
 │   ├── shopify.js           # Talks to Shopify API
 │   │                        #   Fetches products
-│   │                        #   Creates/updates metafields
+│   │                        #   Creates/updates/deletes variant metafields
 │   │
 │   └── webhooks.js          # Manages Katana webhook subscriptions
 │                            #   Registers webhooks, verifies incoming requests
@@ -174,7 +179,10 @@ shopify-katana-integration/
 | `getLastSyncResult` | sync.js | Get results of last sync for /status |
 | `startScheduler` | cron/scheduler.js | Start the automatic timer |
 | `isSyncInProgress` | cron/scheduler.js | Check if sync is already running (prevent double-runs) |
+| `setSyncInProgress` | cron/scheduler.js | Set the sync-in-progress flag (used by manual trigger + webhooks) |
+| `SYNC_SCHEDULE` | cron/scheduler.js | The cron schedule string (shown in health check response) |
 | `setupPOWebhooks` | services/webhooks.js | Register webhooks with Katana |
+| `verifyWebhookSignature` | services/webhooks.js | Verify incoming webhook requests are from Katana |
 
 ---
 
@@ -184,7 +192,7 @@ shopify-katana-integration/
 
 **Key functions:**
 
-#### `runSync()` (line 27)
+#### `runSync()` (line 29)
 This is the main function. Everything starts here. Here's exactly what happens:
 
 ```
@@ -198,26 +206,23 @@ Step 1: Call katana.buildArrivalDateMap()
 Step 2: Call shopify.fetchAllProducts()
         → This returns all Shopify products with their variants/SKUs
 
-Step 3: For EACH Shopify product:
-        → Look at each variant's SKU
+Step 3: For EACH Shopify variant (not product):
+        → Get the variant's SKU
+        → Skip if no SKU
         → Check if that SKU exists in the arrival date map
-        → If yes: call shopify.updateArrivalMetafields() to write the data
-        → If no: skip this product
-        → Wait 600ms between products (Shopify rate limit)
+        → If matched: call shopify.updateVariantArrivalMetafields(variant.id, data)
+          to write arrival metafields on THAT variant
+        → If no match: call shopify.clearVariantArrivalMetafields(variant.id)
+          to DELETE any stale arrival metafields from that variant
+        → Wait 550ms between variants (Shopify rate limit)
 
 Step 4: Log a summary of what happened
 ```
 
-#### `findBestArrival(product, arrivalDateMap)` (line 130)
-For a single Shopify product (which may have multiple variants/SKUs), this finds the variant with the **earliest** arrival date.
+**Why per-variant instead of per-product?** A product like "T-Shirt" may have sizes S, M, L. Each size is a variant with its own SKU. Size S may have stock arriving March 15 while size L arrives April 1. By writing metafields per-variant, the storefront can show accurate per-size arrival dates.
 
-Example: A t-shirt has sizes S, M, L (3 variants, 3 SKUs). If Small arrives March 15 and Large arrives April 1, this picks March 15.
-
-#### `getLastSyncResult()` (line 10)
+#### `getLastSyncResult()` (line 13)
 Returns the last sync result object. Used by the `/status` endpoint.
-
-#### `syncSingleVariant(katanaVariantId)` (line 155)
-A smaller version of `runSync()` — does a full rebuild but targeted for webhook use. Currently the webhook handler just calls `runSync()` instead since we have <100 products.
 
 ---
 
@@ -239,27 +244,29 @@ Think of it like: "create a messenger that already knows the address and passwor
 #### `fetchAllPages(endpoint)` (line 29)
 Handles **pagination**. APIs don't return all data at once — they return page 1, then you ask for page 2, etc. This function keeps fetching until there are no more pages.
 
+Katana uses the `x-pagination` response header. This header contains a JSON object with a `last_page` field. The function increments the `page` query parameter and stops when `last_page` is `true`.
+
 ```
-Page 1: GET /variants → returns 100 items + "next page" link
-Page 2: GET /variants?page=2 → returns 50 items + no "next page"
-Done: total 150 items collected
+Page 1: GET /variants?page=1 → returns items + x-pagination header { last_page: false }
+Page 2: GET /variants?page=2 → returns items + x-pagination header { last_page: true }
+Done: all items collected
 ```
 
-#### `fetchAllVariants()` (line 71)
+#### `fetchAllVariants()` (line 76)
 Calls `GET /v1/variants` to get all Katana variants.
 Each variant has an `id` and a `sku`. The SKU is how we match to Shopify.
 
-#### `fetchAllPurchaseOrders()` (line 106)
+#### `fetchAllPurchaseOrders()` (line 94)
 Calls `GET /v1/purchase_orders` to get all POs.
 Each PO has: `id`, `po_no`, `status`, `expected_arrival_date`.
 We only care about POs where status is NOT "RECEIVED" (still open).
 
-#### `fetchAllPurchaseOrderRows()` (line 138)
+#### `fetchAllPurchaseOrderRows()` (line 108)
 Calls `GET /v1/purchase_order_rows` to get all PO line items.
 Each row links a `variant_id` to a `purchase_order_id` with `quantity` and `received_quantity`.
 We calculate remaining: `quantity - received_quantity`.
 
-#### `buildArrivalDateMap()` (line 167) — THE BIG ONE
+#### `buildArrivalDateMap()` (line 137) — THE BIG ONE
 This is the most important function. Here's the step-by-step:
 
 ```
@@ -320,30 +327,35 @@ Each product has:
 }
 ```
 
-#### `setProductMetafields(productId, metafields)` (line 77)
-Takes a product ID and an array of metafield objects, writes them one by one.
+#### `setVariantMetafields(variantId, metafields)` (line 76)
+Takes a variant ID and an array of metafield objects, writes them one by one.
 
-If a metafield already exists (HTTP 422 error), it calls `findAndUpdateMetafield()` to find the existing one and update it instead.
+If a metafield already exists (HTTP 422 error), it calls `findAndUpdateVariantMetafield()` to find the existing one and update it instead.
 
-#### `findAndUpdateMetafield(productId, mf)` (line 120)
-When creating a metafield fails because it already exists:
-1. Lists existing metafields for that product
+#### `findAndUpdateVariantMetafield(variantId, mf)` (line 117)
+When creating a variant metafield fails because it already exists:
+1. Lists existing metafields for that variant
 2. Finds the one matching our namespace + key
 3. Updates it with the new value via PUT
 
-#### `updateArrivalMetafields(productId, arrivalData)` (line 169)
-The main function called by sync.js. Takes arrival data and writes 3 metafields:
+#### `updateVariantArrivalMetafields(variantId, arrivalData)` (line 166)
+The main function called by sync.js. Takes arrival data and writes 3 metafields **on the variant**:
 
 ```
-katana.next_expected_arrival_date  →  "2026-03-15"     (date type)
-katana.next_expected_qty           →  85                (integer type)
-katana.next_expected_po_id         →  "PO-42"           (text type)
+custom.next_expected_arrival_date  →  "2026-03-15"     (date type)
+custom.next_expected_quantity      →  85                (integer type)
+custom.next_expected_po_id         →  "PO-42"           (text type)
 ```
 
-#### `clearArrivalMetafields(productId)` (line 198)
-Sets metafields to empty/zero when there are no more open POs for a product.
+#### `clearVariantArrivalMetafields(variantId)` (line 199)
+**Deletes** the arrival metafields from a variant when there are no open POs for it. Shopify does not allow setting metafields to blank/empty values, so we delete them entirely.
 
-#### `formatDateForShopify(isoDateString)` (line 226)
+Flow:
+1. Fetches existing metafields in the `custom` namespace for the variant
+2. Finds any with keys matching our arrival fields
+3. Deletes each one via `DELETE /variants/{id}/metafields/{mf_id}.json`
+
+#### `formatDateForShopify(isoDateString)` (line 224)
 Converts `"2026-03-15T00:00:00.000Z"` → `"2026-03-15"` (Shopify's date format).
 
 ---
@@ -356,7 +368,12 @@ Converts `"2026-03-15T00:00:00.000Z"` → `"2026-03-15"` (Shopify's date format)
 - **Without webhooks (polling):** You check your mailbox every hour. "Any letters? No. Any letters? No. Any letters? Yes!"
 - **With webhooks:** The postman rings your doorbell when a letter arrives. Instant.
 
-**Events we subscribe to:**
+**Current webhook setup:**
+- **Callback URL:** `https://turnoffroad.duckdns.org/webhooks/katana`
+- **Status:** Registered and active (token saved in `.env`)
+- **SSL:** Required — Katana sends webhooks over HTTPS (hence the DuckDNS domain with SSL cert)
+
+**Events we subscribe to (defined in `PO_WEBHOOK_EVENTS` array, line 16):**
 ```
 purchase_order.created              — New PO created
 purchase_order.updated              — PO details changed (arrival date!)
@@ -369,19 +386,39 @@ purchase_order_row.deleted          — Item removed from PO
 purchase_order_row.received         — Item marked as received
 ```
 
+**End-to-end webhook flow:**
+```
+1. Someone edits a PO in Katana (e.g., changes arrival date)
+2. Katana sees this matches a subscribed event (purchase_order.updated)
+3. Katana sends POST to https://turnoffroad.duckdns.org/webhooks/katana
+   Body: { "event": "purchase_order.updated", "payload": { ... } }
+4. Our server (index.js line 84) receives it
+5. Responds 200 immediately (Katana requires 2xx within 10 seconds)
+6. In background: checks if it's a PO event → triggers runSync()
+7. runSync() re-fetches all data from Katana and updates Shopify metafields
+```
+
 **Key functions:**
 
-#### `setupPOWebhooks()` (line 118)
-One-time setup. Registers our server URL with Katana:
-1. Lists existing webhooks (to avoid duplicates)
-2. If not already registered, creates a new webhook via `POST /v1/webhooks`
-3. Katana returns a `token` for verification — save this in `.env`
+#### `listWebhooks()` (line 46)
+Calls `GET /v1/webhooks` to list all existing webhook subscriptions in Katana. Used by `setupPOWebhooks()` to check if our URL is already registered (avoids duplicates).
 
 #### `createWebhook(url, events)` (line 68)
-Sends `POST /v1/webhooks` with our callback URL and event list.
+Sends `POST /v1/webhooks` with our callback URL and event list. Katana returns the created webhook object including a `token` for verification.
+
+#### `deleteWebhook(webhookId)` (line 97)
+Calls `DELETE /v1/webhooks/{id}` to remove a webhook subscription. Useful if you need to re-register with different events.
+
+#### `setupPOWebhooks()` (line 118)
+The main setup function (already run, one-time):
+1. Checks if `WEBHOOK_CALLBACK_URL` is set in `.env`
+2. Calls `listWebhooks()` to check if our URL is already registered
+3. If already registered: returns the existing webhook (no duplicate)
+4. If not registered: calls `createWebhook()` to register a new one
+5. Logs the webhook `token` — must be saved as `KATANA_WEBHOOK_TOKEN` in `.env`
 
 #### `verifyWebhookSignature(headers, body)` (line 165)
-Checks that an incoming webhook request is actually from Katana (not someone pretending to be).
+Checks that an incoming webhook request is actually from Katana (not someone pretending to be). Compares the `token` field in the webhook payload against the `KATANA_WEBHOOK_TOKEN` env var. If no token is configured, it allows all requests through (dev mode).
 
 ---
 
@@ -452,7 +489,9 @@ You ─── POST /sync ───→ index.js (line 49)
                                   └── runSync() ← calls sync.js
                                       ├── katana.buildArrivalDateMap()
                                       ├── shopify.fetchAllProducts()
-                                      ├── Match SKUs + update metafields
+                                      ├── For each variant: match SKU
+                                      │   ├── Matched → update variant metafields
+                                      │   └── Not matched → delete variant metafields
                                       └── Log summary
                                   setSyncInProgress(false)
 ```
@@ -460,10 +499,10 @@ You ─── POST /sync ───→ index.js (line 49)
 **How to trigger:**
 ```bash
 # From your terminal:
-curl -X POST http://159.203.85.16/sync
+curl -X POST https://turnoffroad.duckdns.org/sync
 
 # Then check result:
-curl http://159.203.85.16/status
+curl https://turnoffroad.duckdns.org/status
 ```
 
 ---
@@ -500,7 +539,7 @@ Server starts ──→ index.js (line 154) calls startScheduler()
 Someone edits a PO in Katana UI (or via API)
         │
         └── Katana sends HTTP POST to our server
-            POST http://159.203.85.16/webhooks/katana
+            POST https://turnoffroad.duckdns.org/webhooks/katana
             Body: { "event": "purchase_order.updated", "payload": { ... } }
                 │
                 └── index.js (line 84) receives it
@@ -514,10 +553,10 @@ Someone edits a PO in Katana UI (or via API)
                             └── (same full sync as manual)
 ```
 
-**Setup required (one-time):**
+**Setup (already completed):**
+Webhooks are registered at `https://turnoffroad.duckdns.org/webhooks/katana`. The webhook token is saved in `.env` as `KATANA_WEBHOOK_TOKEN`. If you ever need to re-register:
 ```bash
-# Register webhooks with Katana:
-curl -X POST http://159.203.85.16/webhooks/setup
+curl -X POST https://turnoffroad.duckdns.org/webhooks/setup
 ```
 
 **Katana retry policy:** If our server doesn't respond 2xx within 10 seconds, Katana retries at: 30 seconds, 2 minutes, 15 minutes.
@@ -529,12 +568,12 @@ curl -X POST http://159.203.85.16/webhooks/setup
 Here's the complete journey, line by line:
 
 ```
-1. runSync() is called (sync.js line 27)
+1. runSync() is called (sync.js line 29)
 
 2. KATANA PHASE:
-   ├── buildArrivalDateMap() called (katana.js line 167)
+   ├── buildArrivalDateMap() called (katana.js line 137)
    │
-   ├── 3 API calls fire IN PARALLEL (Promise.all on line 171):
+   ├── 3 API calls fire IN PARALLEL (Promise.all on line 141):
    │   ├── GET https://api.katanamrp.com/v1/variants
    │   │   → Returns: [{ id: 100, sku: "WIDGET-A" }, { id: 101, sku: "GADGET-B" }, ...]
    │   │
@@ -566,34 +605,40 @@ Here's the complete journey, line by line:
    ├── fetchAllProducts() called (shopify.js line 32)
    │   GET https://your-store.myshopify.com/admin/api/2024-10/products.json
    │   → Returns: [{ id: 9876, title: "Widget A",
-   │                  variants: [{ sku: "WIDGET-A" }] }, ...]
+   │                  variants: [{ id: 111, sku: "WIDGET-A" }] }, ...]
    │
-   ├── For product "Widget A":
-   │   ├── Variant SKU = "WIDGET-A"
-   │   ├── Look up in arrival map → FOUND!
-   │   │   → { nextArrivalDate: "2026-03-15", expectedQty: 85, poNumber: "PO-42" }
-   │   │
-   │   ├── updateArrivalMetafields(9876, data) called (shopify.js line 169)
-   │   │   ├── POST /products/9876/metafields.json
-   │   │   │   → { namespace: "katana", key: "next_expected_arrival_date",
-   │   │   │       value: "2026-03-15", type: "date" }
-   │   │   │
-   │   │   ├── POST /products/9876/metafields.json
-   │   │   │   → { namespace: "katana", key: "next_expected_qty",
-   │   │   │       value: "85", type: "number_integer" }
-   │   │   │
-   │   │   └── POST /products/9876/metafields.json
-   │   │       → { namespace: "katana", key: "next_expected_po_id",
-   │   │           value: "PO-42", type: "single_line_text_field" }
-   │   │
-   │   └── Log: SUCCESS "Updated Widget A → 85 units arriving 2026-03-15 (PO-42)"
+   ├── For each product → for each variant:
    │
-   ├── Wait 600ms (rate limiting)
+   │   ├── Variant "Default" (ID: 111, SKU: "WIDGET-A")
+   │   │   ├── Look up SKU in arrival map → FOUND!
+   │   │   │   → { nextArrivalDate: "2026-03-15", expectedQty: 85, poNumber: "PO-42" }
+   │   │   │
+   │   │   ├── updateVariantArrivalMetafields(111, data) called (shopify.js line 166)
+   │   │   │   ├── POST /variants/111/metafields.json
+   │   │   │   │   → { namespace: "custom", key: "next_expected_arrival_date",
+   │   │   │   │       value: "2026-03-15", type: "date" }
+   │   │   │   │
+   │   │   │   ├── POST /variants/111/metafields.json
+   │   │   │   │   → { namespace: "custom", key: "next_expected_quantity",
+   │   │   │   │       value: "85", type: "number_integer" }
+   │   │   │   │
+   │   │   │   └── POST /variants/111/metafields.json
+   │   │   │       → { namespace: "custom", key: "next_expected_po_id",
+   │   │   │           value: "PO-42", type: "single_line_text_field" }
+   │   │   │
+   │   │   └── Log: SUCCESS "Updated variant (ID: 111, SKU: WIDGET-A) → Arrival: 2026-03-15, Qty: 85, PO: PO-42"
+   │   │
+   │   ├── Wait 550ms (rate limiting)
+   │   │
+   │   └── Variant "Other" (ID: 222, SKU: "WIDGET-B") — no match in arrival map
+   │       ├── clearVariantArrivalMetafields(222) called (shopify.js line 199)
+   │       │   → Fetches existing metafields, DELETES any arrival-related ones
+   │       └── Log: "Cleared arrival metafields for variant (ID: 222, SKU: WIDGET-B) — no inbound POs"
    │
    └── Next product... (repeat)
 
 4. DONE:
-   └── Log summary: { matched: 1, updated: 1, skipped: 45, failed: 0, duration: "12.3s" }
+   └── Log summary: { matched: 1, updated: 1, cleared: 1, skipped: 0, failed: 0, duration: "15.3s" }
 ```
 
 ---
@@ -613,15 +658,18 @@ IN SHOPIFY:
 
 MATCH: Both have SKU "WIDGET-A" → They're the same item!
 
-So we write to the Shopify product:
+So we write to the Shopify VARIANT (not the product):
   "85 units arriving March 15, PO-42"
 ```
 
 **What if a Shopify product has multiple variants (sizes/colors)?**
-We check ALL variant SKUs and pick the one with the **earliest** arrival date.
+Each variant is processed individually. Size S, Size M, and Size L each get their own arrival metafields based on their own SKU match. This means each variant can show different arrival dates.
 
 **What if a SKU has multiple open POs?**
 We pick the one with the **earliest** `expected_arrival_date`. We also track `totalInboundQty` across all POs and `openPOCount`.
+
+**What if a variant has no open POs?**
+We **delete** any existing arrival metafields from that variant, so stale data doesn't remain. Shopify doesn't allow blank metafield values, so deletion is the correct approach.
 
 ---
 
@@ -629,7 +677,7 @@ We pick the one with the **earliest** `expected_arrival_date`. We also track `to
 
 ### `GET /` — Health Check
 ```bash
-curl http://159.203.85.16/
+curl https://turnoffroad.duckdns.org/
 ```
 Response:
 ```json
@@ -644,7 +692,7 @@ Response:
 
 ### `GET /status` — Last Sync Result
 ```bash
-curl http://159.203.85.16/status
+curl https://turnoffroad.duckdns.org/status
 ```
 Response (after a sync has run):
 ```json
@@ -654,11 +702,13 @@ Response (after a sync has run):
     "startedAt": "2026-02-14T10:00:00.000Z",
     "finishedAt": "2026-02-14T10:00:12.300Z",
     "duration": "12.3s",
-    "katanaSkusWithPOs": 5,
+    "katanaSkus": 5,
     "shopifyProducts": 46,
+    "shopifyVariants": 120,
     "matched": 5,
     "updated": 5,
-    "skipped": 41,
+    "cleared": 115,
+    "skipped": 0,
     "failed": 0,
     "errors": []
   }
@@ -667,7 +717,7 @@ Response (after a sync has run):
 
 ### `POST /sync` — Manual Trigger
 ```bash
-curl -X POST http://159.203.85.16/sync
+curl -X POST https://turnoffroad.duckdns.org/sync
 ```
 Response (immediate):
 ```json
@@ -678,9 +728,10 @@ Response (immediate):
 ```
 Then check `/status` to see the result once it finishes.
 
-### `POST /webhooks/setup` — Register Katana Webhooks (One-Time)
+### `POST /webhooks/setup` — Register Katana Webhooks (One-Time, Already Done)
+Webhooks are already registered. If you ever need to re-register:
 ```bash
-curl -X POST http://159.203.85.16/webhooks/setup
+curl -X POST https://turnoffroad.duckdns.org/webhooks/setup
 ```
 Response:
 ```json
@@ -688,13 +739,13 @@ Response:
   "message": "Webhooks registered successfully",
   "webhook": {
     "id": 123,
-    "url": "http://159.203.85.16/webhooks/katana",
+    "url": "https://turnoffroad.duckdns.org/webhooks/katana",
     "events": ["purchase_order.created", "purchase_order.updated", ...],
     "token": "***a1b2"
   }
 }
 ```
-**IMPORTANT:** Save the full token (from server logs) as `KATANA_WEBHOOK_TOKEN` in `.env`.
+**IMPORTANT:** Save the full token (from server logs) as `KATANA_WEBHOOK_TOKEN` in `.env`, then restart PM2.
 
 ### `POST /webhooks/katana` — Webhook Receiver (Called by Katana)
 Not something you call manually. Katana sends POST requests here automatically.
@@ -714,11 +765,11 @@ nano .env    # or edit in VS Code
 |----------|-----------|---------|
 | `PORT` | Port the server runs on | `3000` |
 | `SHOPIFY_STORE_URL` | Your Shopify store domain | `my-store.myshopify.com` |
-| `SHOPIFY_ACCESS_TOKEN` | Shopify Admin API access token | `shpat_abc123...` |
+| `SHOPIFY_ACCESS_TOKEN` | Shopify Admin API access token | `shpca_abc123...` (new Dev Dashboard apps use `shpca_` prefix) |
 | `SHOPIFY_API_VERSION` | Shopify API version | `2024-10` |
 | `KATANA_API_KEY` | Katana API key (from Settings > API) | `kat_xyz789...` |
 | `KATANA_API_BASE_URL` | Katana API base URL | `https://api.katanamrp.com/v1` |
-| `WEBHOOK_CALLBACK_URL` | Public URL for webhook receiver | `http://159.203.85.16/webhooks/katana` |
+| `WEBHOOK_CALLBACK_URL` | Public URL for webhook receiver | `https://turnoffroad.duckdns.org/webhooks/katana` |
 | `KATANA_WEBHOOK_TOKEN` | Token from webhook setup (for verification) | `73f82127d57a2cea` |
 | `SYNC_CRON_SCHEDULE` | How often to auto-sync | `0 */6 * * *` |
 
@@ -736,7 +787,7 @@ Think of it as: "bring in the code from that file so I can use its functions."
 ### `module.exports` — Exporting Functions
 ```javascript
 // In katana.js:
-module.exports = { fetchAllVariants, buildArrivalDateMap };
+module.exports = { fetchAllVariants, fetchAllPurchaseOrders, fetchAllPurchaseOrderRows, buildArrivalDateMap };
 
 // In sync.js:
 const katana = require('./services/katana');
@@ -836,14 +887,14 @@ pm2 logs shopify-katana-integration
 pm2 logs shopify-katana-integration
 
 # In another terminal (or from your laptop):
-curl -X POST http://159.203.85.16/sync
+curl -X POST https://turnoffroad.duckdns.org/sync
 
 # Watch the first terminal — you'll see every step logged
 ```
 
 ### Step 4: Check the Sync Result
 ```bash
-curl http://159.203.85.16/status | python3 -m json.tool
+curl https://turnoffroad.duckdns.org/status | python3 -m json.tool
 # (python3 -m json.tool makes the JSON pretty-printed)
 ```
 
@@ -910,7 +961,7 @@ node test-katana.js
 ### Common Debug Commands
 ```bash
 # Check server health
-curl http://159.203.85.16/
+curl https://turnoffroad.duckdns.org/
 
 # Check if .env is loaded (from server)
 pm2 env 0 | grep KATANA    # Shows env vars for the PM2 process
@@ -959,18 +1010,18 @@ pm2 restart shopify-katana-integration
 
 # 7. Verify it's running
 pm2 status
-curl http://159.203.85.16/
+curl https://turnoffroad.duckdns.org/
 
-# 8. Register webhooks (one-time)
-curl -X POST http://159.203.85.16/webhooks/setup
+# 8. Register webhooks (one-time, already done)
+curl -X POST https://turnoffroad.duckdns.org/webhooks/setup
 # Save the token to .env, then restart again
 nano .env  # Add KATANA_WEBHOOK_TOKEN=<token from response>
 pm2 restart shopify-katana-integration
 
 # 9. Test with manual sync
-curl -X POST http://159.203.85.16/sync
+curl -X POST https://turnoffroad.duckdns.org/sync
 # Wait a few seconds, then:
-curl http://159.203.85.16/status
+curl https://turnoffroad.duckdns.org/status
 ```
 
 ### Subsequent Deploys (After Code Changes)
@@ -1000,7 +1051,7 @@ cd ~/shopify-katana-integration && git pull && pm2 restart shopify-katana-integr
 | `409 Sync already in progress` | You triggered /sync while one is running | Wait for current sync to finish, check /status |
 | `ECONNREFUSED` | Server can't reach Katana/Shopify | Check internet on server, DNS, firewall |
 | Webhook events not arriving | Webhooks not registered | Run `POST /webhooks/setup` |
-| Metafield not showing in Shopify | Metafield exists but not exposed to storefront | In Shopify Admin, go to Settings > Custom data > Products > add katana.* metafields |
+| Metafield not showing in Shopify | Metafield exists but not exposed to storefront | In Shopify Admin, go to Settings > Custom data > **Variants** > add custom.* metafields with storefront access |
 
 ---
 
@@ -1009,12 +1060,12 @@ cd ~/shopify-katana-integration && git pull && pm2 restart shopify-katana-integr
 Use this checklist when testing after deployment:
 
 ```
-[ ] Server is running (curl http://159.203.85.16/ returns JSON)
+[ ] Server is running (curl https://turnoffroad.duckdns.org/ returns JSON)
 [ ] .env has all variables set
 [ ] Katana API works (test-katana.js returns variants)
 [ ] Shopify API works (test-shopify.js returns products)
 [ ] Manual sync works (POST /sync, then GET /status shows results)
-[ ] Metafields appear in Shopify admin (Products > select product > Metafields section)
+[ ] Metafields appear in Shopify admin (Products > select product > select variant > Metafields section)
 [ ] SKU matching is correct (check logs for matched/skipped counts)
 [ ] Cron scheduler is running (logs show "Cron scheduler started successfully")
 [ ] Webhooks registered (POST /webhooks/setup returns success)

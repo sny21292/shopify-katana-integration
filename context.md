@@ -314,4 +314,4 @@ server {
 - **Webhook strategy:** Webhooks are the primary update mechanism. Cron is backup only. Both trigger the same `runSync()` function.
 - **Rate limiting:** 550ms delay between Shopify API calls per variant to stay within rate limits.
 - **Concurrency protection:** A `syncInProgress` flag prevents overlapping syncs from manual trigger, cron, and webhooks.
-- **Product-level functions kept as legacy:** `updateArrivalMetafields()` and `clearArrivalMetafields()` still exist in `shopify.js` but are no longer called by the sync. They write to products instead of variants and could be removed if not needed.
+- **Dead code cleanup (completed):** Legacy product-level functions (`setProductMetafields`, `findAndUpdateMetafield`, `updateArrivalMetafields`, `clearArrivalMetafields`) and unused Katana helpers (`buildVariantSkuMap`, `fetchPurchaseOrder`) were removed. Only active variant-level functions remain.

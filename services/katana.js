@@ -80,23 +80,6 @@ async function fetchAllVariants() {
   return variants;
 }
 
-/**
- * Build a lookup map: { variant_id → sku }
- */
-async function buildVariantSkuMap() {
-  const variants = await fetchAllVariants();
-  const map = {};
-
-  for (const v of variants) {
-    if (v.sku) {
-      map[v.id] = v.sku;
-    }
-  }
-
-  logger.info(`Variant SKU map built: ${Object.keys(map).length} variants with SKUs`);
-  return map;
-}
-
 // ─── Purchase Orders ─────────────────────────────────────────
 
 /**
@@ -113,24 +96,6 @@ async function fetchAllPurchaseOrders() {
   const purchaseOrders = await fetchAllPages('/purchase_orders');
   logger.info(`Fetched ${purchaseOrders.length} purchase orders from Katana`);
   return purchaseOrders;
-}
-
-/**
- * Fetch a single purchase order by ID
- */
-async function fetchPurchaseOrder(poId) {
-  const client = getClient();
-
-  try {
-    const response = await client.get(`/purchase_orders/${poId}`);
-    return response.data.data || response.data;
-  } catch (error) {
-    logger.error(`Failed to fetch PO ${poId}`, {
-      status: error.response?.status,
-      message: error.response?.data?.message || error.message,
-    });
-    throw error;
-  }
 }
 
 /**
@@ -270,9 +235,7 @@ async function buildArrivalDateMap() {
 
 module.exports = {
   fetchAllVariants,
-  buildVariantSkuMap,
   fetchAllPurchaseOrders,
-  fetchPurchaseOrder,
   fetchAllPurchaseOrderRows,
   buildArrivalDateMap,
 };
