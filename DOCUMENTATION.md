@@ -70,7 +70,7 @@
                ▼
 ┌──────────────────────────────────────────────────────────────┐
 │               OUR SERVER (Digital Ocean)                      │
-│               https://turnoffroad.duckdns.org                │
+│               https://katana.turnoffroad.com                 │
 │                                                              │
 │  1. Fetches variants from Katana (to get SKUs)               │
 │  2. Fetches Purchase Orders (to get arrival dates)           │
@@ -369,7 +369,7 @@ Converts `"2026-03-15T00:00:00.000Z"` → `"2026-03-15"` (Shopify's date format)
 - **With webhooks:** The postman rings your doorbell when a letter arrives. Instant.
 
 **Current webhook setup:**
-- **Callback URL:** `https://turnoffroad.duckdns.org/webhooks/katana`
+- **Callback URL:** `https://katana.turnoffroad.com/webhooks/katana`
 - **Status:** Registered and active (token saved in `.env`)
 - **SSL:** Required — Katana sends webhooks over HTTPS (hence the DuckDNS domain with SSL cert)
 
@@ -390,7 +390,7 @@ purchase_order_row.received         — Item marked as received
 ```
 1. Someone edits a PO in Katana (e.g., changes arrival date)
 2. Katana sees this matches a subscribed event (purchase_order.updated)
-3. Katana sends POST to https://turnoffroad.duckdns.org/webhooks/katana
+3. Katana sends POST to https://katana.turnoffroad.com/webhooks/katana
    Body: { "event": "purchase_order.updated", "payload": { ... } }
 4. Our server (index.js line 84) receives it
 5. Responds 200 immediately (Katana requires 2xx within 10 seconds)
@@ -499,10 +499,10 @@ You ─── POST /sync ───→ index.js (line 49)
 **How to trigger:**
 ```bash
 # From your terminal:
-curl -X POST https://turnoffroad.duckdns.org/sync
+curl -X POST https://katana.turnoffroad.com/sync
 
 # Then check result:
-curl https://turnoffroad.duckdns.org/status
+curl https://katana.turnoffroad.com/status
 ```
 
 ---
@@ -539,7 +539,7 @@ Server starts ──→ index.js (line 154) calls startScheduler()
 Someone edits a PO in Katana UI (or via API)
         │
         └── Katana sends HTTP POST to our server
-            POST https://turnoffroad.duckdns.org/webhooks/katana
+            POST https://katana.turnoffroad.com/webhooks/katana
             Body: { "event": "purchase_order.updated", "payload": { ... } }
                 │
                 └── index.js (line 84) receives it
@@ -554,9 +554,9 @@ Someone edits a PO in Katana UI (or via API)
 ```
 
 **Setup (already completed):**
-Webhooks are registered at `https://turnoffroad.duckdns.org/webhooks/katana`. The webhook token is saved in `.env` as `KATANA_WEBHOOK_TOKEN`. If you ever need to re-register:
+Webhooks are registered at `https://katana.turnoffroad.com/webhooks/katana`. The webhook token is saved in `.env` as `KATANA_WEBHOOK_TOKEN`. If you ever need to re-register:
 ```bash
-curl -X POST https://turnoffroad.duckdns.org/webhooks/setup
+curl -X POST https://katana.turnoffroad.com/webhooks/setup
 ```
 
 **Katana retry policy:** If our server doesn't respond 2xx within 10 seconds, Katana retries at: 30 seconds, 2 minutes, 15 minutes.
@@ -677,7 +677,7 @@ We **delete** any existing arrival metafields from that variant, so stale data d
 
 ### `GET /` — Health Check
 ```bash
-curl https://turnoffroad.duckdns.org/
+curl https://katana.turnoffroad.com/
 ```
 Response:
 ```json
@@ -692,7 +692,7 @@ Response:
 
 ### `GET /status` — Last Sync Result
 ```bash
-curl https://turnoffroad.duckdns.org/status
+curl https://katana.turnoffroad.com/status
 ```
 Response (after a sync has run):
 ```json
@@ -717,7 +717,7 @@ Response (after a sync has run):
 
 ### `POST /sync` — Manual Trigger
 ```bash
-curl -X POST https://turnoffroad.duckdns.org/sync
+curl -X POST https://katana.turnoffroad.com/sync
 ```
 Response (immediate):
 ```json
@@ -731,7 +731,7 @@ Then check `/status` to see the result once it finishes.
 ### `POST /webhooks/setup` — Register Katana Webhooks (One-Time, Already Done)
 Webhooks are already registered. If you ever need to re-register:
 ```bash
-curl -X POST https://turnoffroad.duckdns.org/webhooks/setup
+curl -X POST https://katana.turnoffroad.com/webhooks/setup
 ```
 Response:
 ```json
@@ -739,7 +739,7 @@ Response:
   "message": "Webhooks registered successfully",
   "webhook": {
     "id": 123,
-    "url": "https://turnoffroad.duckdns.org/webhooks/katana",
+    "url": "https://katana.turnoffroad.com/webhooks/katana",
     "events": ["purchase_order.created", "purchase_order.updated", ...],
     "token": "***a1b2"
   }
@@ -769,7 +769,7 @@ nano .env    # or edit in VS Code
 | `SHOPIFY_API_VERSION` | Shopify API version | `2024-10` |
 | `KATANA_API_KEY` | Katana API key (from Settings > API) | `kat_xyz789...` |
 | `KATANA_API_BASE_URL` | Katana API base URL | `https://api.katanamrp.com/v1` |
-| `WEBHOOK_CALLBACK_URL` | Public URL for webhook receiver | `https://turnoffroad.duckdns.org/webhooks/katana` |
+| `WEBHOOK_CALLBACK_URL` | Public URL for webhook receiver | `https://katana.turnoffroad.com/webhooks/katana` |
 | `KATANA_WEBHOOK_TOKEN` | Token from webhook setup (for verification) | `73f82127d57a2cea` |
 | `SYNC_CRON_SCHEDULE` | How often to auto-sync | `0 */6 * * *` |
 
@@ -852,7 +852,7 @@ If anything inside `try` throws an error, it jumps to `catch` instead of crashin
 ### Step 1: Check if the Server is Running
 ```bash
 # SSH into the server
-ssh root@159.203.85.16
+ssh -i ~/.ssh/gretrix root@159.203.85.16
 
 # Check PM2 process status
 pm2 status
@@ -887,14 +887,14 @@ pm2 logs shopify-katana-integration
 pm2 logs shopify-katana-integration
 
 # In another terminal (or from your laptop):
-curl -X POST https://turnoffroad.duckdns.org/sync
+curl -X POST https://katana.turnoffroad.com/sync
 
 # Watch the first terminal — you'll see every step logged
 ```
 
 ### Step 4: Check the Sync Result
 ```bash
-curl https://turnoffroad.duckdns.org/status | python3 -m json.tool
+curl https://katana.turnoffroad.com/status | python3 -m json.tool
 # (python3 -m json.tool makes the JSON pretty-printed)
 ```
 
@@ -961,7 +961,7 @@ node test-katana.js
 ### Common Debug Commands
 ```bash
 # Check server health
-curl https://turnoffroad.duckdns.org/
+curl https://katana.turnoffroad.com/
 
 # Check if .env is loaded (from server)
 pm2 env 0 | grep KATANA    # Shows env vars for the PM2 process
@@ -991,7 +991,7 @@ git commit -m "Add Katana PO arrival date sync"
 git push origin main
 
 # 2. SSH into server
-ssh root@159.203.85.16
+ssh -i ~/.ssh/gretrix root@159.203.85.16
 
 # 3. Pull code on server
 cd ~/shopify-katana-integration
@@ -1010,18 +1010,18 @@ pm2 restart shopify-katana-integration
 
 # 7. Verify it's running
 pm2 status
-curl https://turnoffroad.duckdns.org/
+curl https://katana.turnoffroad.com/
 
 # 8. Register webhooks (one-time, already done)
-curl -X POST https://turnoffroad.duckdns.org/webhooks/setup
+curl -X POST https://katana.turnoffroad.com/webhooks/setup
 # Save the token to .env, then restart again
 nano .env  # Add KATANA_WEBHOOK_TOKEN=<token from response>
 pm2 restart shopify-katana-integration
 
 # 9. Test with manual sync
-curl -X POST https://turnoffroad.duckdns.org/sync
+curl -X POST https://katana.turnoffroad.com/sync
 # Wait a few seconds, then:
-curl https://turnoffroad.duckdns.org/status
+curl https://katana.turnoffroad.com/status
 ```
 
 ### Subsequent Deploys (After Code Changes)
@@ -1032,7 +1032,7 @@ git commit -m "your message"
 git push
 
 # Then SSH into server:
-ssh root@159.203.85.16
+ssh -i ~/.ssh/gretrix root@159.203.85.16
 cd ~/shopify-katana-integration && git pull && pm2 restart shopify-katana-integration
 ```
 
@@ -1060,7 +1060,7 @@ cd ~/shopify-katana-integration && git pull && pm2 restart shopify-katana-integr
 Use this checklist when testing after deployment:
 
 ```
-[ ] Server is running (curl https://turnoffroad.duckdns.org/ returns JSON)
+[ ] Server is running (curl https://katana.turnoffroad.com/ returns JSON)
 [ ] .env has all variables set
 [ ] Katana API works (test-katana.js returns variants)
 [ ] Shopify API works (test-shopify.js returns products)
