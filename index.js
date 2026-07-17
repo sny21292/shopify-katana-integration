@@ -1,7 +1,8 @@
 require('dotenv').config();
 const express = require('express');
 const { runSync, getLastSyncResult } = require('./sync');
-const { startScheduler, isSyncInProgress, setSyncInProgress, SYNC_SCHEDULE } = require('./cron/scheduler');
+const { runInventorySync, getLastInventorySyncResult } = require('./inventory-sync');
+const { startScheduler, isSyncInProgress, setSyncInProgress, isInventorySyncInProgress, setInventorySyncInProgress, SYNC_SCHEDULE, INVENTORY_SYNC_SCHEDULE } = require('./cron/scheduler');
 const { setupPOWebhooks, verifyWebhookSignature, listWebhooks, deleteWebhook } = require('./services/webhooks');
 const logger = require('./utils/logger');
 
@@ -44,6 +45,16 @@ app.get('/', (req, res) => {
   const lastSyncDuration = lastSync?.duration || '—';
   const lastSyncMatches = lastSync?.matched ?? '—';
   const lastSyncUpdates = lastSync?.updated ?? '—';
+
+  const lastInvSync = getLastInventorySyncResult();
+  const invSyncInProgress = isInventorySyncInProgress();
+  const lastInvSyncTime = lastInvSync?.finishedAt
+    ? new Date(lastInvSync.finishedAt).toISOString().replace('T', ' ').slice(0, 19) + ' UTC'
+    : 'Never';
+  const lastInvSyncDuration = lastInvSync?.duration || '—';
+  const lastInvSyncUpdated = lastInvSync?.updated ?? '—';
+  const lastInvSyncFailed = lastInvSync?.failed ?? '—';
+  const invCronSchedule = INVENTORY_SYNC_SCHEDULE || '*/10 * * * *';
 
   const html = `<!DOCTYPE html>
 <html lang="en">
@@ -422,6 +433,70 @@ app.get('/', (req, res) => {
     </div>
   </div>
 
+  <div class="card">
+    <div class="card-label">
+      <svg viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
+      Inventory Sync (Shopify → ShipStation)
+    </div>
+    <div class="status-row">
+      <div class="status-item">
+        <span class="label">Last Sync</span>
+        <span class="value" style="font-size:12px">${lastInvSyncTime}</span>
+      </div>
+      <div class="status-item">
+        <span class="label">Duration</span>
+        <span class="value">${lastInvSyncDuration}</span>
+      </div>
+      <div class="status-item">
+        <span class="label">Updated</span>
+        <span class="value">${lastInvSyncUpdated}</span>
+      </div>
+      <div class="status-item">
+        <span class="label">Failed</span>
+        <span class="value">${lastInvSyncFailed}</span>
+      </div>
+      <div class="status-item">
+        <span class="label">Status</span>
+        <span class="sync-badge ${invSyncInProgress ? 'running' : 'idle'}">${invSyncInProgress ? 'Running' : 'Idle'}</span>
+      </div>
+    </div>
+    <div class="divider"></div>
+    <div class="status-row" style="gap:12px">
+      <div class="status-item">
+        <span class="label">Schedule</span>
+        <span class="value">${invCronSchedule} (every 15 min)</span>
+      </div>
+      <button onclick="syncInventory()" id="syncBtn" class="link-btn" style="margin-left:auto;background:var(--accent);color:#fff;border-color:var(--accent)">
+        <svg viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+        Sync Inventory Now
+      </button>
+    </div>
+  </div>
+
+  <script>
+  function syncInventory() {
+    var btn = document.getElementById('syncBtn');
+    btn.innerHTML = 'Syncing...';
+    btn.disabled = true;
+    btn.style.opacity = '0.6';
+    fetch('/inventory-sync', { method: 'POST' })
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        btn.innerHTML = 'Sync Started!';
+        setTimeout(function() {
+          btn.innerHTML = '<svg viewBox="0 0 24 24" style="width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg> Sync Inventory Now';
+          btn.disabled = false;
+          btn.style.opacity = '1';
+        }, 3000);
+      })
+      .catch(function(err) {
+        btn.innerHTML = 'Error - Try Again';
+        btn.disabled = false;
+        btn.style.opacity = '1';
+      });
+  }
+  </script>
+
   <div class="footer">Built by <a href="https://www.cloveode.com/" target="_blank" rel="noopener" style="color:var(--accent);font-weight:600;text-decoration:none">CloveOde</a></div>
 
 </div>
@@ -581,6 +656,48 @@ app.delete('/webhooks/:id', async (req, res) => {
       error: `Failed to delete webhook ${req.params.id}`,
       message: error.message,
     });
+  }
+});
+
+// ─── Inventory Sync Status ──────────────────────────────────
+app.get('/inventory-status', (req, res) => {
+  const lastResult = getLastInventorySyncResult();
+
+  if (!lastResult) {
+    return res.json({
+      message: 'No inventory sync has been run yet',
+      inventorySyncInProgress: isInventorySyncInProgress(),
+    });
+  }
+
+  res.json({
+    inventorySyncInProgress: isInventorySyncInProgress(),
+    lastSync: lastResult,
+  });
+});
+
+// ─── Manual Inventory Sync Trigger ──────────────────────────
+app.post('/inventory-sync', async (req, res) => {
+  if (isInventorySyncInProgress()) {
+    return res.status(409).json({
+      error: 'Inventory sync already in progress',
+      message: 'Please wait for the current sync to finish',
+    });
+  }
+
+  // Respond immediately, run sync in background
+  res.json({
+    message: 'Inventory sync started',
+    startedAt: new Date().toISOString(),
+  });
+
+  setInventorySyncInProgress(true);
+  try {
+    await runInventorySync();
+  } catch (error) {
+    logger.error('Manual inventory sync failed', { message: error.message });
+  } finally {
+    setInventorySyncInProgress(false);
   }
 });
 
