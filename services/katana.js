@@ -202,12 +202,17 @@ async function buildArrivalDateMap() {
       arrivalsBysku[sku] = [];
     }
 
+    // Check if PO name contains "OTW" (On The Way) — means items are en route
+    const poName = (po.poNumber || '').toUpperCase();
+    const isOTW = poName.includes('OTW');
+
     arrivalsBysku[sku].push({
       arrivalDate,
       arrivalDateISO: po.expectedArrivalDate,
       expectedQty: remaining,
       poNumber: po.poNumber,
       poId: po.id,
+      isOTW,
     });
   }
 
@@ -219,6 +224,9 @@ async function buildArrivalDateMap() {
     arrivals.sort((a, b) => a.arrivalDate - b.arrivalDate);
 
     const earliest = arrivals[0];
+    // en_route is true if ANY open PO for this SKU has "OTW" in its name
+    const isEnRoute = arrivals.some((a) => a.isOTW);
+
     arrivalDateMap[sku] = {
       nextArrivalDate: earliest.arrivalDateISO,
       expectedQty: earliest.expectedQty,
@@ -226,6 +234,7 @@ async function buildArrivalDateMap() {
       poId: earliest.poId,
       totalInboundQty: arrivals.reduce((sum, a) => sum + a.expectedQty, 0),
       openPOCount: arrivals.length,
+      isEnRoute,
     };
   }
 

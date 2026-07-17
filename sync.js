@@ -81,7 +81,7 @@ async function runSync() {
             results.updated++;
             const totalQty = arrivalData.totalInboundQty || arrivalData.expectedQty;
             logger.info(
-              `Updated variant "${variant.title}" (ID: ${variant.id}, SKU: ${sku}) of "${product.title}" → Arrival: ${arrivalData.nextArrivalDate}, Total Inbound Qty: ${totalQty} (across ${arrivalData.openPOCount || 1} PO(s)), Nearest PO: ${arrivalData.poNumber}`
+              `Updated variant "${variant.title}" (ID: ${variant.id}, SKU: ${sku}) of "${product.title}" → Arrival: ${arrivalData.nextArrivalDate}, Total Inbound Qty: ${totalQty} (across ${arrivalData.openPOCount || 1} PO(s)), Nearest PO: ${arrivalData.poNumber}, En Route: ${arrivalData.isEnRoute}`
             );
           } catch (error) {
             results.failed++;

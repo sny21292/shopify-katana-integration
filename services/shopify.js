@@ -185,6 +185,12 @@ async function updateVariantArrivalMetafields(variantId, arrivalData) {
       value: arrivalData.poNumber || String(arrivalData.poId),
       type: 'single_line_text_field',
     },
+    {
+      namespace: 'custom',
+      key: 'en_route',
+      value: arrivalData.isEnRoute ? 'true' : 'false',
+      type: 'boolean',
+    },
   ];
 
   return setVariantMetafields(variantId, metafields);
@@ -202,6 +208,7 @@ async function clearVariantArrivalMetafields(variantId) {
     'next_expected_arrival_date',
     'next_expected_quantity',
     'next_expected_po_id',
+    'en_route',
   ];
 
   // Fetch existing metafields for this variant in the 'custom' namespace
