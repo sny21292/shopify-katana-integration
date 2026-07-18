@@ -223,17 +223,20 @@ async function buildArrivalDateMap() {
     // Sort by arrival date ascending
     arrivals.sort((a, b) => a.arrivalDate - b.arrivalDate);
 
-    const earliest = arrivals[0];
-    // en_route is true if ANY open PO for this SKU has "OTW" in its name
-    const isEnRoute = arrivals.some((a) => a.isOTW);
+    const otwArrivals = arrivals.filter((a) => a.isOTW);
+    const isEnRoute = otwArrivals.length > 0;
+    // When some POs are marked OTW, only those count toward the displayed
+    // date and quantity - unshipped POs stay hidden until marked OTW too.
+    const visible = isEnRoute ? otwArrivals : arrivals;
+    const earliest = visible[0];
 
     arrivalDateMap[sku] = {
       nextArrivalDate: earliest.arrivalDateISO,
       expectedQty: earliest.expectedQty,
       poNumber: earliest.poNumber,
       poId: earliest.poId,
-      totalInboundQty: arrivals.reduce((sum, a) => sum + a.expectedQty, 0),
-      openPOCount: arrivals.length,
+      totalInboundQty: visible.reduce((sum, a) => sum + a.expectedQty, 0),
+      openPOCount: visible.length,
       isEnRoute,
     };
   }
