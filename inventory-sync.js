@@ -1,5 +1,6 @@
 const shopify = require('./services/shopify');
 const shipstation = require('./services/shipstation');
+const katana = require('./services/katana');
 const logger = require('./utils/logger');
 
 /**
@@ -18,11 +19,17 @@ function getLastInventorySyncResult() {
  * Main inventory sync function
  *
  * Flow:
- * 1. Fetch all products from Shopify (with variants and inventory)
- * 2. For each variant with a SKU:
- *    - Get inventory_quantity from Shopify
- *    - Push to ShipStation via API
- * 3. Log summary
+ * 1. Fetch all products from Shopify (for the SKU list)
+ * 2. Fetch on-hand stock per SKU from Shopify (Katana as fallback)
+ * 3. For each variant with a SKU, push the on-hand quantity to ShipStation
+ * 4. Log summary
+ *
+ * Stock source: Shopify's ON HAND (GraphQL inventoryLevels, needs the
+ * read_inventory scope) — the same figure the Shopify admin shows. NOT the
+ * variant's inventory_quantity field, which is "available" (on hand -
+ * committed). Available goes negative on oversold products and gets floored
+ * to 0, which made ShipStation block shipments for units that were physically
+ * sitting in the warehouse.
  */
 async function runInventorySync() {
   const startTime = Date.now();
@@ -34,6 +41,10 @@ async function runInventorySync() {
     duration: null,
     shopifyProducts: 0,
     shopifyVariants: 0,
+    katanaSkus: 0,
+    shopifyOnHandSkus: 0,
+    fellBackToKatana: 0,
+    fellBackToShopifyAvailable: 0,
     updated: 0,
     skipped: 0,
     failed: 0,
@@ -47,8 +58,18 @@ async function runInventorySync() {
     results.shopifyProducts = products.length;
     logger.info(`Fetched ${products.length} Shopify products`);
 
-    // Step 2: Loop through each variant and push to ShipStation
-    logger.info('Step 2: Syncing inventory to ShipStation...');
+    // Step 2: Fetch on-hand stock per SKU — Shopify is the source of truth.
+    // Katana is loaded as a fallback for SKUs Shopify doesn't report.
+    logger.info('Step 2: Fetching on-hand stock from Shopify...');
+    const onHandBySku = await shopify.fetchOnHandBySku();
+    results.shopifyOnHandSkus = Object.keys(onHandBySku).length;
+
+    logger.info('Step 2b: Fetching Katana on-hand as fallback...');
+    const katanaOnHandBySku = await katana.buildOnHandMap();
+    results.katanaSkus = Object.keys(katanaOnHandBySku).length;
+
+    // Step 3: Loop through each variant and push to ShipStation
+    logger.info('Step 3: Syncing inventory to ShipStation...');
 
     for (const product of products) {
       for (const variant of product.variants || []) {
@@ -60,13 +81,39 @@ async function runInventorySync() {
         }
 
         results.shopifyVariants++;
-        const quantity = Math.max(0, variant.inventory_quantity || 0);
+
+        // Stock sent to ShipStation is Shopify's ON HAND — the physical count.
+        // Not "available" (on hand - committed), which goes negative on
+        // oversold products and would block units sitting in the warehouse.
+        //
+        // Fallback order, so no SKU ends up worse off than before:
+        //   1. Shopify on hand   — source of truth, matches the admin UI
+        //   2. Katana on hand    — for SKUs Shopify doesn't report a level for
+        //   3. Shopify available — original behaviour, last resort
+        const shopifyOnHand = onHandBySku[sku];
+        const katanaOnHand = katanaOnHandBySku[sku];
+        const shopifyAvailable = Math.max(0, variant.inventory_quantity || 0);
+        let quantity;
+
+        if (shopifyOnHand !== undefined && shopifyOnHand > 0) {
+          quantity = Math.floor(shopifyOnHand);
+        } else if (shopifyOnHand === 0) {
+          // Genuinely out of stock in Shopify — send 0, don't mask it with
+          // a stale figure from another system.
+          quantity = 0;
+        } else if (katanaOnHand !== undefined && katanaOnHand > 0) {
+          results.fellBackToKatana++;
+          quantity = Math.floor(katanaOnHand);
+        } else {
+          results.fellBackToShopifyAvailable++;
+          quantity = shopifyAvailable;
+        }
 
         try {
           await shipstation.updateInventory(sku, quantity);
           results.updated++;
           logger.info(
-            `Updated "${product.title}" (SKU: ${sku}) → Stock: ${quantity}`
+            `Updated "${product.title}" (SKU: ${sku}) → On hand: ${quantity}`
           );
         } catch (error) {
           results.failed++;
@@ -98,8 +145,12 @@ async function runInventorySync() {
     duration: results.duration,
     shopifyProducts: results.shopifyProducts,
     shopifyVariants: results.shopifyVariants,
+    katanaSkus: results.katanaSkus,
     updated: results.updated,
     skipped: results.skipped,
+    shopifyOnHandSkus: results.shopifyOnHandSkus,
+    fellBackToKatana: results.fellBackToKatana,
+    fellBackToShopifyAvailable: results.fellBackToShopifyAvailable,
     failed: results.failed,
   });
 

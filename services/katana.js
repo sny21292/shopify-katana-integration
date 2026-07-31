@@ -80,6 +80,69 @@ async function fetchAllVariants() {
   return variants;
 }
 
+// ─── Inventory ───────────────────────────────────────────────
+
+/**
+ * Fetch all inventory rows from Katana
+ *
+ * One row per variant per location. Expected fields:
+ *   variant_id, location_id, quantity_in_stock, quantity_committed,
+ *   quantity_expected, ...
+ *
+ * Quantities come back as decimal strings, e.g. "1.0000000000"
+ */
+async function fetchAllInventory() {
+  logger.info('Fetching all inventory from Katana...');
+  const inventory = await fetchAllPages('/inventory');
+  logger.info(`Fetched ${inventory.length} inventory rows from Katana`);
+  return inventory;
+}
+
+/**
+ * Build a map of on-hand stock per SKU
+ *
+ * Katana's quantity_in_stock is the physical "on hand" count — the same
+ * number Shopify shows in its "On hand" column. This is what ShipStation
+ * needs in order to allow a label to be created.
+ *
+ * Note: this is deliberately NOT "available" (on hand - committed).
+ * Available goes negative when a product oversells, which would block
+ * shipping on units that are physically sitting in the warehouse.
+ *
+ * Quantities are summed across all Katana locations.
+ *
+ * Returns: { "RR2-M4": 1, "RR2-M2": 17, ... }
+ */
+async function buildOnHandMap() {
+  logger.info('Building on-hand stock map from Katana inventory...');
+
+  const [variants, inventory] = await Promise.all([
+    fetchAllVariants(),
+    fetchAllInventory(),
+  ]);
+
+  // Build variant_id → SKU lookup
+  const variantSkuLookup = {};
+  for (const v of variants) {
+    if (v.sku) {
+      variantSkuLookup[v.id] = v.sku;
+    }
+  }
+
+  // Sum on-hand quantity across every location for each SKU
+  const onHandMap = {};
+  for (const row of inventory) {
+    const sku = variantSkuLookup[row.variant_id];
+    if (!sku) continue;
+
+    const qty = parseFloat(row.quantity_in_stock) || 0;
+    onHandMap[sku] = (onHandMap[sku] || 0) + qty;
+  }
+
+  logger.info(`On-hand map built: ${Object.keys(onHandMap).length} SKUs`);
+  return onHandMap;
+}
+
 // ─── Purchase Orders ─────────────────────────────────────────
 
 /**
@@ -247,6 +310,8 @@ async function buildArrivalDateMap() {
 
 module.exports = {
   fetchAllVariants,
+  fetchAllInventory,
+  buildOnHandMap,
   fetchAllPurchaseOrders,
   fetchAllPurchaseOrderRows,
   buildArrivalDateMap,

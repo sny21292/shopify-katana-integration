@@ -701,6 +701,55 @@ app.post('/inventory-sync', async (req, res) => {
   }
 });
 
+// ─── Shopify OAuth Callback ──────────────────────────────────
+
+/**
+ * Receives the authorization code after the merchant approves the app's
+ * scopes, and exchanges it for a new Admin API access token.
+ *
+ * Needed because access tokens are issued with a fixed set of scopes — adding
+ * a scope (e.g. read_inventory) requires re-authorising to mint a new token.
+ *
+ * The token is written to the log, not the response body, so it isn't exposed
+ * in the browser or in any proxy logs along the way.
+ */
+app.get('/auth/callback', async (req, res) => {
+  const { code, shop } = req.query;
+
+  if (!code) {
+    return res.status(400).send('Missing ?code — start from the authorize URL.');
+  }
+
+  try {
+    const axios = require('axios');
+    const shopDomain = shop || process.env.SHOPIFY_STORE_URL;
+
+    const response = await axios.post(`https://${shopDomain}/admin/oauth/access_token`, {
+      client_id: process.env.SHOPIFY_CLIENT_ID,
+      client_secret: process.env.SHOPIFY_CLIENT_SECRET,
+      code,
+    });
+
+    const { access_token, scope } = response.data;
+
+    logger.info('=========== SHOPIFY OAUTH TOKEN ISSUED ===========');
+    logger.info(`scopes: ${scope}`);
+    logger.info(`token: ${access_token}`);
+    logger.info('=================================================');
+
+    res.send(
+      `<h2>Token issued</h2><p>Scopes: <code>${scope}</code></p>` +
+      `<p>The token has been written to the server log — it is not shown here.</p>`
+    );
+  } catch (error) {
+    logger.error('OAuth token exchange failed', {
+      status: error.response?.status,
+      message: JSON.stringify(error.response?.data) || error.message,
+    });
+    res.status(500).send(`Token exchange failed: ${error.response?.status} ${JSON.stringify(error.response?.data || error.message)}`);
+  }
+});
+
 // ─── Start Server ────────────────────────────────────────────
 app.listen(PORT, () => {
   logger.info(`Server running on port ${PORT}`);

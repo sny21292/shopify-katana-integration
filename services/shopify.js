@@ -65,6 +65,79 @@ async function fetchAllProducts() {
   return allProducts;
 }
 
+// ─── On-Hand Stock ───────────────────────────────────────────
+
+/**
+ * Build a map of on-hand stock per SKU
+ *
+ * "On hand" is the physical count in the warehouse — the number shown in the
+ * Shopify admin's On hand column. It is NOT the same as the variant's
+ * inventory_quantity field, which is "available" (on hand - committed) and
+ * goes negative on oversold products.
+ *
+ * Only available via GraphQL inventoryLevels, which needs the read_inventory
+ * access scope.
+ *
+ * Quantities are summed across all locations.
+ *
+ * Returns: { "RR2-M4": 1, "EA1-M1": 4, ... }
+ */
+async function fetchOnHandBySku() {
+  logger.info('Fetching on-hand stock from Shopify...');
+
+  const client = getClient();
+  const onHand = {};
+  let cursor = null;
+  let page = 0;
+
+  do {
+    const query = `{
+      productVariants(first: 50${cursor ? `, after: "${cursor}"` : ''}) {
+        pageInfo { hasNextPage endCursor }
+        edges {
+          node {
+            sku
+            inventoryItem {
+              inventoryLevels(first: 10) {
+                edges { node { quantities(names: ["on_hand"]) { quantity } } }
+              }
+            }
+          }
+        }
+      }
+    }`;
+
+    const response = await client.post('/graphql.json', { query });
+
+    if (response.data.errors) {
+      logger.error('Shopify on-hand query failed', { errors: response.data.errors });
+      throw new Error(response.data.errors[0].message);
+    }
+
+    const connection = response.data.data.productVariants;
+
+    for (const { node } of connection.edges) {
+      if (!node.sku) continue;
+
+      // Sum on_hand across every location for this variant
+      const total = node.inventoryItem.inventoryLevels.edges
+        .flatMap((e) => e.node.quantities)
+        .reduce((sum, q) => sum + (q.quantity || 0), 0);
+
+      onHand[node.sku] = (onHand[node.sku] || 0) + total;
+    }
+
+    cursor = connection.pageInfo.hasNextPage ? connection.pageInfo.endCursor : null;
+    page++;
+
+    // GraphQL leaky bucket — pause between pages to stay under the cost limit
+    if (cursor) await new Promise((r) => setTimeout(r, 600));
+  } while (cursor);
+
+  logger.info(`On-hand map built from Shopify: ${Object.keys(onHand).length} SKUs (${page} pages)`);
+  return onHand;
+}
+
 // ─── Variant Metafield Operations ────────────────────────────
 
 /**
@@ -236,6 +309,7 @@ function formatDateForShopify(isoDateString) {
 
 module.exports = {
   fetchAllProducts,
+  fetchOnHandBySku,
   setVariantMetafields,
   updateVariantArrivalMetafields,
   clearVariantArrivalMetafields,
