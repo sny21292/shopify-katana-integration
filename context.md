@@ -25,7 +25,7 @@ Setting up a Node.js backend server on Digital Ocean to sync **Purchase Order ar
 ### Shopify (New-Style Dev Dashboard App)
 - **App Name:** Katana Integration (created in Shopify Dev Dashboard)
 - **Dev Dashboard:** [dev.shopify.com](https://dev.shopify.com)
-- **Client ID:** `9c661db6c5f4e992b6da923f1833184c`
+- **Client ID:** stored in `.env` as `SHOPIFY_CLIENT_ID` (not recorded here)
 - **Access Token:** `shpca_xxxx` (obtained via OAuth flow, stored in .env)
 - **API Scopes:** `read_products`, `write_products`
 - **Store URL:** `turn-offroad.myshopify.com`
@@ -56,7 +56,8 @@ Setting up a Node.js backend server on Digital Ocean to sync **Purchase Order ar
 - **Nginx:** installed as reverse proxy on port 80
 
 ### Server Access
-- SSH: `ssh root@159.203.85.16` (key: `~/.ssh/gretrix`)
+- SSH: `ssh root@159.203.85.16` (uses the key loaded in your SSH agent — the `~/.ssh/gretrix`
+  path referenced previously no longer exists locally, so omit `-i`)
 - Web URL: `http://159.203.85.16`
 - Domain: `https://turnoffroad.duckdns.org` (DuckDNS dynamic DNS)
 - Digital Ocean Console available via browser
@@ -137,13 +138,15 @@ These must be created in Shopify Admin under **Variants** (not Products) so they
 ```
 shopify-katana-integration/
 ├── index.js              # Express server (health, status, sync, webhook endpoints)
-├── sync.js               # Main sync script (per-variant PO arrival date matching + orchestration)
+├── sync.js               # Katana -> Shopify sync (per-variant PO arrival date matching)
+├── inventory-sync.js     # Shopify -> ShipStation stock sync (on-hand levels, every 15 min)
 ├── services/
 │   ├── katana.js          # Katana API: variants, POs, PO rows, build arrival map
 │   ├── shopify.js         # Shopify API: fetch products, update/delete variant arrival metafields
-│   └── webhooks.js        # Katana webhook registration + verification
+│   ├── webhooks.js        # Katana webhook registration + verification
+│   └── shipstation.js     # ShipStation V2 API: push on-hand stock per SKU
 ├── cron/
-│   └── scheduler.js       # Cron job setup (node-cron, backup sync every 6hrs)
+│   └── scheduler.js       # Cron setup: arrival sync every 6hrs, inventory sync every 15 min
 ├── utils/
 │   └── logger.js          # Lightweight logger (console + daily log files)
 ├── logs/                  # Auto-created log files (sync-YYYY-MM-DD.log)
@@ -168,7 +171,7 @@ shopify-katana-integration/
 PORT=3000
 
 # Shopify OAuth (from Dev Dashboard — only needed for token generation)
-SHOPIFY_CLIENT_ID=9c661db6c5f4e992b6da923f1833184c
+SHOPIFY_CLIENT_ID=xxxxx
 SHOPIFY_CLIENT_SECRET=shpss_xxxxx
 
 # Shopify Admin API
@@ -179,6 +182,11 @@ SHOPIFY_API_VERSION=2024-10
 # Katana MRP API
 KATANA_API_KEY=xxxxx
 KATANA_API_BASE_URL=https://api.katanamrp.com/v1
+
+# ShipStation V2 API (inventory sync)
+SHIPSTATION_API_KEY=xxxxx
+SHIPSTATION_LOCATION_ID=se-4492637
+INVENTORY_SYNC_CRON_SCHEDULE=*/15 * * * *
 
 # Katana Webhooks
 WEBHOOK_CALLBACK_URL=https://turnoffroad.duckdns.org/webhooks/katana
@@ -225,15 +233,16 @@ server {
 
 | Task | Command |
 |------|---------|
-| SSH into server | `ssh -i ~/.ssh/gretrix root@159.203.85.16` |
+| SSH into server | `ssh root@159.203.85.16` |
 | Check PM2 status | `pm2 status` |
 | View live logs | `pm2 logs shopify-katana-integration` |
 | View last 50 logs | `pm2 logs shopify-katana-integration --lines 50` |
 | Restart app | `pm2 restart shopify-katana-integration` |
 | Edit env on server | `nano ~/shopify-katana-integration/.env` |
-| Upload files (SCP) | `scp -i ~/.ssh/gretrix <file> root@159.203.85.16:/root/shopify-katana-integration/` |
-| Upload all files | `scp -i ~/.ssh/gretrix -r index.js sync.js services/ cron/ utils/ .env package.json root@159.203.85.16:/root/shopify-katana-integration/` |
+| Upload files (SCP) | `scp <file> root@159.203.85.16:/root/shopify-katana-integration/` |
+| Upload all files | `scp -r index.js sync.js inventory-sync.js services/ cron/ utils/ package.json root@159.203.85.16:/root/shopify-katana-integration/` |
 | Deploy + restart | Upload files → `ssh root@159.203.85.16 "pm2 restart shopify-katana-integration"` |
+| Trigger inventory sync | `curl -X POST http://localhost:3000/inventory-sync` |
 | Trigger manual sync | `curl -X POST https://turnoffroad.duckdns.org/sync` |
 | Check sync status | `curl https://turnoffroad.duckdns.org/status` |
 | Register webhooks | `curl -X POST https://turnoffroad.duckdns.org/webhooks/setup` |

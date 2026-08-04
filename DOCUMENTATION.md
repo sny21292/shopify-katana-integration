@@ -1,7 +1,15 @@
 # Shopify-Katana Integration — Complete Documentation
 
-> A Node.js backend that syncs Purchase Order arrival dates from **Katana MRP** to **Shopify variant metafields**.
-> This enables the Shopify storefront to show per-variant messages like **"85 units arriving Feb 28"**.
+> A Node.js backend running two independent syncs:
+>
+> 1. **Katana → Shopify** (every 6 hours) — writes Purchase Order arrival dates to Shopify variant
+>    metafields, so the storefront can show **"85 units arriving Feb 28"**. This is the original
+>    integration and is what sections 1–14 describe.
+> 2. **Shopify → ShipStation** (every 15 minutes) — pushes on-hand stock levels into ShipStation so
+>    the warehouse can create shipping labels. See [section 15](#15-shopify--shipstation-inventory-sync).
+>
+> The two share `services/shopify.js` and `services/katana.js` but are otherwise separate — neither
+> depends on the other running.
 
 ---
 
@@ -31,6 +39,7 @@
 12. [Deployment Guide](#12-deployment-guide)
 13. [Common Errors & Fixes](#13-common-errors--fixes)
 14. [Testing Checklist](#14-testing-checklist)
+15. [Shopify → ShipStation Inventory Sync](#15-shopify--shipstation-inventory-sync)
 
 ---
 
@@ -770,8 +779,19 @@ nano .env    # or edit in VS Code
 | `KATANA_API_KEY` | Katana API key (from Settings > API) | `kat_xyz789...` |
 | `KATANA_API_BASE_URL` | Katana API base URL | `https://api.katanamrp.com/v1` |
 | `WEBHOOK_CALLBACK_URL` | Public URL for webhook receiver | `https://katana.turnoffroad.com/webhooks/katana` |
-| `KATANA_WEBHOOK_TOKEN` | Token from webhook setup (for verification) | `73f82127d57a2cea` |
+| `KATANA_WEBHOOK_TOKEN` | Token from webhook setup (for verification) | `xxxxx` |
 | `SYNC_CRON_SCHEDULE` | How often to auto-sync | `0 */6 * * *` |
+| `SHIPSTATION_API_KEY` | ShipStation **V2** API key (inventory sync) | `TEST_abc123...` |
+| `SHIPSTATION_LOCATION_ID` | ShipStation inventory location to write stock to | `se-4492637` |
+| `INVENTORY_SYNC_CRON_SCHEDULE` | How often to push stock to ShipStation | `*/15 * * * *` |
+| `SHOPIFY_CLIENT_ID` | Shopify app API key (used by the OAuth callback) | `9c661db6...` |
+| `SHOPIFY_CLIENT_SECRET` | Shopify app secret (used by the OAuth callback) | `shpss_...` |
+
+**Required Shopify scopes:** `read_products`, `write_products`, **`read_inventory`**.
+
+`read_inventory` is needed by the inventory sync to read the **On hand** quantity. Scopes are fixed
+into a token when it is issued — adding a scope in the app config does nothing until the app is
+re-authorised and a **new token** generated. See [section 15](#15-shopify--shipstation-inventory-sync).
 
 ---
 
@@ -1073,3 +1093,99 @@ Use this checklist when testing after deployment:
 [ ] Webhook events trigger sync (update a PO in Katana, check logs)
 [ ] Log files are being created (ls logs/)
 ```
+
+---
+
+## 15. Shopify → ShipStation Inventory Sync
+
+A second, independent sync that pushes stock levels from Shopify into ShipStation every 15 minutes,
+so the warehouse can create shipping labels. Added July 2026.
+
+### Why it exists
+
+ShipStation blocks label creation for products it believes have no stock. It needs to be told what
+is physically in the warehouse.
+
+### The critical detail: On Hand vs Available
+
+Shopify tracks **two different stock numbers**, and confusing them caused a production incident:
+
+| Shopify field | Meaning | Example (RR2-M4) |
+|---------------|---------|------------------|
+| **On hand** | units physically on the shelf | `1` |
+| **Committed** | units promised to unfulfilled orders | `11` |
+| **Available** | `on_hand - committed` | `-10` |
+
+The REST field `variant.inventory_quantity` is **Available**, *not* On hand. On oversold products
+(where "Sell when out of stock" is enabled) it goes **negative**.
+
+**The bug (fixed 31 July 2026):** the sync sent Available. `Math.max(0, -10)` floored it to `0`, and
+the ShipStation API **deletes the inventory record entirely** when it receives 0. A deleted record
+reads as "unknown stock", which blocked shipment of a unit that was physically in the warehouse.
+
+**The fix:** send Shopify's **On hand**, read via GraphQL `inventoryLevels` (needs `read_inventory`).
+
+### Stock source and fallback chain
+
+`inventory-sync.js` resolves quantity in this order, so no SKU is ever worse off than before:
+
+1. **Shopify on hand** — source of truth, matches the Shopify admin
+2. **Katana on hand** (`quantity_in_stock`) — for SKUs Shopify reports no level for
+3. **Shopify available** — original behaviour, last resort
+
+Katana is a fallback only. Its data can be wrong — it reported `-9` on-hand for `HW-TSGP1` where
+Shopify correctly showed `4`, which is why it is not the primary source.
+
+### Files
+
+| File | Role |
+|------|------|
+| `inventory-sync.js` | Orchestrator — fetches stock, pushes each SKU to ShipStation |
+| `services/shipstation.js` | ShipStation V2 API client |
+| `services/shopify.js` → `fetchOnHandBySku()` | GraphQL on-hand per SKU |
+| `services/katana.js` → `buildOnHandMap()` | Katana on-hand per SKU (fallback) |
+| `cron/scheduler.js` → `startInventoryScheduler()` | 15-minute timer |
+
+### ShipStation API limits (confirmed with their support)
+
+- **Only `quantity` (on hand) is writable.** `allocated` is read-only and `available` is *calculated*
+  as `on_hand - allocated`. Neither can be set — writes are silently ignored or rejected with 400.
+- **No allocation endpoint exists** anywhere in the V2 API. Allocation is a manual action in the
+  ShipStation UI (Orders → select → Allocate); it does not happen on order import and cannot be
+  automated.
+- **Sending quantity 0 deletes the record.** This is why ~216 SKUs currently have no ShipStation
+  record and show as "unknown stock". Not yet addressed.
+- **Pagination is cursor-based** via `links.next`. A `page` parameter is accepted but **ignored**,
+  and `limit` is capped at 50 — paging by page number silently returns the same rows repeatedly.
+
+### Endpoints
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/inventory-sync` | POST | Trigger the inventory sync manually |
+| `/inventory-status` | GET | Result of the last inventory sync |
+| `/auth/callback` | GET | Shopify OAuth callback — exchanges the authorisation code for an access token and writes it to the log |
+
+### Regenerating the Shopify token (when scopes change)
+
+Scopes are baked into a token at issue time. Ticking a new scope in the app config does nothing to
+an existing token. To pick up a new scope:
+
+1. Open (substituting the store and client id):
+   `https://<store>.myshopify.com/admin/oauth/authorize?client_id=<SHOPIFY_CLIENT_ID>&scope=read_products,write_products,read_inventory&redirect_uri=https://katana.turnoffroad.com/auth/callback`
+2. Approve. The browser lands on `/auth/callback`, which exchanges the code and writes the new token
+   to the log (not to the page, so it is not exposed in browser history).
+3. Read it from the log, update `SHOPIFY_ACCESS_TOKEN` in `.env`, restart PM2.
+
+**Note:** tokens for this app carry the `shpca_` prefix (Dev Dashboard apps), which is what the
+previous token used too — re-authorising does not change the token type. If both syncs start
+failing with 401s, a revoked or rotated token is the first thing to check.
+
+### Known gaps
+
+- **~216 SKUs have no ShipStation record**, because a 0 push deletes it. Harmless while they have no
+  stock, but they are in the same state that blocked RR2-M4.
+- **~100 virtual SKUs** (`NVDPROTECTION*`, `Koozier`) are synced pointlessly, adding ~2.5 minutes to
+  every run.
+- **Runtime is ~10 minutes against a 15-minute schedule** (1.5s per SKU for rate limiting), leaving
+  little headroom as the catalogue grows.
