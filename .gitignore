@@ -25,3 +25,11 @@ Thumbs.db
 # Build
 dist/
 build/
+
+# Env backups (never commit, repo is public)
+.env.*
+!.env.example
+
+# Local notes and data exports
+CLAUDE.md
+*.csv
