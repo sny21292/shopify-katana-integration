@@ -1,6 +1,5 @@
 const shopify = require('./services/shopify');
 const shipstation = require('./services/shipstation');
-const katana = require('./services/katana');
 const logger = require('./utils/logger');
 
 /**
@@ -20,7 +19,7 @@ function getLastInventorySyncResult() {
  *
  * Flow:
  * 1. Fetch all products from Shopify (for the SKU list)
- * 2. Fetch on-hand stock per SKU from Shopify (Katana as fallback)
+ * 2. Fetch on-hand stock per SKU from Shopify
  * 3. For each variant with a SKU, push the on-hand quantity to ShipStation
  * 4. Log summary
  *
@@ -41,9 +40,7 @@ async function runInventorySync() {
     duration: null,
     shopifyProducts: 0,
     shopifyVariants: 0,
-    katanaSkus: 0,
     shopifyOnHandSkus: 0,
-    fellBackToKatana: 0,
     fellBackToShopifyAvailable: 0,
     updated: 0,
     skipped: 0,
@@ -58,15 +55,18 @@ async function runInventorySync() {
     results.shopifyProducts = products.length;
     logger.info(`Fetched ${products.length} Shopify products`);
 
-    // Step 2: Fetch on-hand stock per SKU — Shopify is the source of truth.
-    // Katana is loaded as a fallback for SKUs Shopify doesn't report.
+    // Step 2: Fetch on-hand stock per SKU from Shopify.
+    //
+    // Deliberately does NOT call Katana. A Katana fallback used to live here,
+    // but this job runs every 15 minutes and each pass pulled Katana's full
+    // variants and inventory lists (~2,400 requests/day). That exhausted
+    // Katana's rate limit and made the 6-hourly arrival sync — which depends
+    // entirely on Katana — fail with 429s. The fallback was never once used
+    // (fellBackToKatana was 0 on every run), so it cost us a working sync for
+    // no benefit.
     logger.info('Step 2: Fetching on-hand stock from Shopify...');
     const onHandBySku = await shopify.fetchOnHandBySku();
     results.shopifyOnHandSkus = Object.keys(onHandBySku).length;
-
-    logger.info('Step 2b: Fetching Katana on-hand as fallback...');
-    const katanaOnHandBySku = await katana.buildOnHandMap();
-    results.katanaSkus = Object.keys(katanaOnHandBySku).length;
 
     // Step 3: Loop through each variant and push to ShipStation
     logger.info('Step 3: Syncing inventory to ShipStation...');
@@ -88,10 +88,8 @@ async function runInventorySync() {
         //
         // Fallback order, so no SKU ends up worse off than before:
         //   1. Shopify on hand   — source of truth, matches the admin UI
-        //   2. Katana on hand    — for SKUs Shopify doesn't report a level for
-        //   3. Shopify available — original behaviour, last resort
+        //   2. Shopify available — original behaviour, last resort
         const shopifyOnHand = onHandBySku[sku];
-        const katanaOnHand = katanaOnHandBySku[sku];
         const shopifyAvailable = Math.max(0, variant.inventory_quantity || 0);
         let quantity;
 
@@ -101,9 +99,6 @@ async function runInventorySync() {
           // Genuinely out of stock in Shopify — send 0, don't mask it with
           // a stale figure from another system.
           quantity = 0;
-        } else if (katanaOnHand !== undefined && katanaOnHand > 0) {
-          results.fellBackToKatana++;
-          quantity = Math.floor(katanaOnHand);
         } else {
           results.fellBackToShopifyAvailable++;
           quantity = shopifyAvailable;
@@ -145,11 +140,9 @@ async function runInventorySync() {
     duration: results.duration,
     shopifyProducts: results.shopifyProducts,
     shopifyVariants: results.shopifyVariants,
-    katanaSkus: results.katanaSkus,
     updated: results.updated,
     skipped: results.skipped,
     shopifyOnHandSkus: results.shopifyOnHandSkus,
-    fellBackToKatana: results.fellBackToKatana,
     fellBackToShopifyAvailable: results.fellBackToShopifyAvailable,
     failed: results.failed,
   });
